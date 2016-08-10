@@ -385,4 +385,43 @@ if (!function_exists('hash_pbkdf2')) {
     }
 }
 
+function string_suffix($string, $suffix)
+{
+  if (substr($string, -1) == $suffix)
+  {
+    return $string;
+  }
+  else
+  {
+    return $string . $suffix;
+  }
+}
+
+function get_client_info()
+{
+  if(isset($_SERVER['HTTP_X_FORWARDED_FOR']))
+  {
+    $ip = $_SERVER['HTTP_X_FORWARDED_FOR'];
+    $proxy = $_SERVER['REMOTE_ADDR'];
+    $host = @gethostbyaddr($_SERVER['HTTP_X_FORWARDED_FOR']);
+  }
+  else
+  {
+    $ip = $_SERVER['REMOTE_ADDR'];
+    $proxy = '';
+    $host = @gethostbyaddr($_SERVER['REMOTE_ADDR']);
+  }
+  
+  if (!isset($host) || empty($host))
+  {
+    $host = '';
+  }
+  
+  return array(
+    'ip' => $ip,
+    'proxy' => $proxy,
+    'host' => $host
+  );
+}
+
 ?>
