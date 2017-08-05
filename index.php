@@ -20,7 +20,7 @@ if (!is_logged_in() and isset($_POST['formname']) and $_POST['formname'] === "lo
 
 if (is_logged_in() and isset($_POST['formname']) and $_POST['formname'] === "changepwform") {
     if (get_sess_user() == $_POST['username']) {
-        if (!update_user(get_sess_user(), is_adminuser(), $_POST['password'])) {
+        if (!update_user(get_sess_userid(), is_adminuser(), $_POST['password'])) {
             $errormsg = "Unable to update password!\n";
         }
     } else {
@@ -114,7 +114,44 @@ if ($blocklogin === TRUE) {
     <div id="dnssecinfo">
     </div>
     <div id="clearlogs" style="display: none;">
-        Are you sure you want to clear all the logs? Maybe save them first?
+        Are you sure you want to clear the current logs? Maybe download them
+        first<?php if($allowrotatelogs) { ?>, or use "Rotate logs" to save
+        them on the server<?php } ?>?
+    </div>
+    <div id="rotatelogs" style="display: none;">
+        Are you sure you want to rotate the current logs?
+    </div>
+    <div id="searchlogs" style="display: none; text-align: right;">
+        <table border="0">
+        <tr><td>User:</td><td><input type="text" id ="searchlogs-user"><br></td></tr>
+        <tr><td>Log Entry:</td><td><input type="text" id ="searchlogs-entry"></td></tr>
+        </table>
+    </div>
+    <div id="searchzone" style="display: none; text-align: right;">
+        <table border="0">
+        <tr><td>Label:</td><td><input type="text" id ="searchzone-label"><br></td></tr>
+        <tr><td>Type:</td><td style="text-align: left;"><select id="searchzone-type">
+            <option value=""></option>
+            <option value="A">A</option>
+            <option value="AAAA">AAAA</option>
+            <option value="CERT">CERT</option>
+            <option value="CNAME">CNAME</option>
+            <option value="ALIAS">ALIAS</option>
+            <option value="LOC">LOC</option>
+            <option value="MX">MX</option>
+            <option value="NAPTR">NAPTR</option>
+            <option value="NS">NS</option>
+            <option value="PTR">PTR</option>
+            <option value="SOA">SOA</option>
+            <option value="SPF">SPF</option>
+            <option value="SRV">SRV</option>
+            <option value="SSHFP">SSHFP</option>
+            <option value="TLSA">TLSA</option>
+            <option value="CAA">CAA</option>
+            <option value="TXT">TXT</option>
+        </select><br></td></tr>
+        <tr><td>Content:</td><td><input type="text" id ="searchzone-content"></td></tr>
+        </table>
     </div>
     <div id="menu" class="jtable-main-container <?php if ($menutype === 'horizontal') { ?>horizontal<?php } ?>">
         <div class="jtable-title menu-title">
@@ -138,8 +175,8 @@ if ($blocklogin === TRUE) {
     ?>
     <div id="zones">
         <?php if (is_adminuser() or $allowzoneadd === TRUE) { ?>
-        <div style="visibility: hidden;" id="ImportZone"></div>
-        <div style="visibility: hidden;" id="CloneZone"></div>
+        <div style="display: none;" id="ImportZone"></div>
+        <div style="display: none;" id="CloneZone"></div>
         <?php } ?>
         <div class="tables" id="MasterZones">
             <div class="searchbar" id="searchbar">
@@ -154,9 +191,25 @@ if ($blocklogin === TRUE) {
     </div>
     <div id="logs">
         <div class="tables" id="Logs"></div>
+        <?php if($allowrotatelogs) { ?>
+        <br>Log entries being viewed:
+        <select id="logfile">
+        <option value="">(Current logs)</option>
+        <?php
+            $logfiles=listrotatedlogs();
+            if($logfiles !== FALSE) {
+                foreach ($logfiles as $filename) {
+                    echo '<option value="' . $filename . '">' . str_replace(".json","",$filename) . "</option>\n";
+                }
+            }
+        ?></select>
+        <?php } else { ?>
+        <input type="hidden" id="logfile" value="">
+        <?php } ?>
     </div>
     <?php } ?>
 
+    <?php if (has_local_auth()) { ?>
     <div id="AboutMe">
         <div class="tables">
             <p>Hi <?php echo get_sess_user(); ?>. You can change your password here.</p>
@@ -181,9 +234,11 @@ if ($blocklogin === TRUE) {
                     </tr>
                 </table>
                 <input type="hidden" name="formname" value="changepwform">
+                <input type="hidden" name="id" value="<?php echo get_sess_userid(); ?>">
             </form>
         </div>
     </div>
+    <?php } ?>
 </div>
 <script type="text/javascript">
 window.csrf_token = '<?php echo CSRF_TOKEN ?>';
@@ -473,6 +528,40 @@ $(document).ready(function () {
                             addNewRecord: 'Add to ' + zone.name,
                             noDataAvailable: 'No records for ' + zone.name
                         },
+                        toolbar: {
+                            items: [
+                                {
+                                    text: 'Search zone',
+                                    click: function() {
+                                        $("#searchzone").dialog({
+                                            modal: true,
+                                            title: "Search zone for ...",
+                                            width: 'auto',
+                                            buttons: {
+                                                Search: function() {
+                                                    $( this ).dialog( 'close' );
+                                                    opentable.find('.jtable-title-text').text(opentableTitle + " (filtered)");
+                                                    opentable.jtable('load', {
+                                                        label: $('#searchzone-label').val(),
+                                                        type: $('#searchzone-type').val(),
+                                                        content: $('#searchzone-content').val()
+                                                    });
+                                                },
+                                                Reset: function() {
+                                                    $('#searchzone-label').val('');
+                                                    $('#searchzone-type').val('');
+                                                    $('#searchzone-content').val('');
+                                                    $( this ).dialog( 'close' );
+                                                    opentable.find('.jtable-title-text').text(opentableTitle);
+                                                    opentable.jtable('load');
+                                                    return false;
+                                                }
+                                            }
+                                        });
+                                    }
+                                }
+                            ],
+                        },
                         paging: true,
                         sorting: true,
                         pageSize: 20,
@@ -526,12 +615,16 @@ $(document).ready(function () {
                                             'AAAA': 'AAAA',
                                             'CERT': 'CERT',
                                             'CNAME': 'CNAME',
+                                            'ALIAS': 'ALIAS',
                                             'LOC': 'LOC',
                                             'NAPTR': 'NAPTR',
                                             'SPF': 'SPF',
                                             'SRV': 'SRV',
                                             'SSHFP': 'SSHFP',
                                             'TLSA': 'TLSA',
+                                            'CAA': 'CAA',
+                                            'DNAME': 'DNAME',
+                                            'DS': 'DS'
                                         };
                                     }
                                     return {
@@ -539,6 +632,9 @@ $(document).ready(function () {
                                         'AAAA': 'AAAA',
                                         'CERT': 'CERT',
                                         'CNAME': 'CNAME',
+                                        'DNAME': 'DNAME',
+                                        'ALIAS': 'ALIAS',
+                                        'DS': 'DS',
                                         'LOC': 'LOC',
                                         'MX': 'MX',
                                         'NAPTR': 'NAPTR',
@@ -549,6 +645,7 @@ $(document).ready(function () {
                                         'SRV': 'SRV',
                                         'SSHFP': 'SSHFP',
                                         'TLSA': 'TLSA',
+                                        'CAA': 'CAA',
                                         'TXT': 'TXT',
                                     };
                                 },
@@ -609,6 +706,8 @@ $(document).ready(function () {
                             },
                         }
                     }, function (data) {
+                        opentable=data.childTable;
+                        opentableTitle=opentable.find('.jtable-title-text').text();
                         data.childTable.jtable('load');
                     });
             });
@@ -854,18 +953,18 @@ $(document).ready(function () {
     });
 
     <?php if (is_adminuser()) { ?>
-    $('#Logs').hide();
+    $('#logs').hide();
     $('#Users').hide();
     $('#AboutMe').hide();
     $('#aboutme').click(function () {
-        $('#Logs').hide();
+        $('#logs').hide();
         $('#Users').hide();
         $('#MasterZones').hide();
         $('#SlaveZones').hide();
         $('#AboutMe').show();
     });
     $('#useradmin').click(function () {
-        $('#Logs').hide();
+        $('#logs').hide();
         $('#MasterZones').hide();
         $('#SlaveZones').hide();
         $('#AboutMe').hide();
@@ -873,7 +972,7 @@ $(document).ready(function () {
         $('#Users').show();
     });
     $('#zoneadmin').click(function () {
-        $('#Logs').hide();
+        $('#logs').hide();
         $('#Users').hide();
         $('#AboutMe').hide();
         $('#MasterZones').show();
@@ -884,8 +983,10 @@ $(document).ready(function () {
         $('#AboutMe').hide();
         $('#MasterZones').hide();
         $('#SlaveZones').hide();
-        $('#Logs').jtable('load');
-        $('#Logs').show();
+        $('#Logs').jtable('load', {
+            logfile: $('#logfile').val()
+        });
+        $('#logs').show();
     });
     $('#Users').jtable({
         title: 'Users',
@@ -903,12 +1004,15 @@ $(document).ready(function () {
             deleteConfirmation: 'This user will be deleted. Are you sure?'
         },
         fields: {
+            id: {
+                key: true,
+                type: 'hidden'
+            },
             emailaddress: {
                 title: 'User',
-                key: true,
                 display: displayContent('emailaddress'),
                 inputClass: 'emailaddress',
-                create: true,
+                edit: false,
                 listClass: 'emailaddress'
             },
             password: {
@@ -938,8 +1042,7 @@ $(document).ready(function () {
         pageSize: 20,
         sorting: false,
         actions: {
-            listAction: 'logs.php?action=list',
-            deleteAction: 'logs.php?action=delete',
+            listAction: 'logs.php?action=list'
         },
         messages: {
             deleteConfirmation: 'This entry will be deleted. Are you sure?'
@@ -949,6 +1052,62 @@ $(document).ready(function () {
             hoverAnimationDuration: 60,
             hoverAnimationEasing: undefined,
             items: [
+                {
+                    text: 'Search logs',
+                    click: function() {
+                        $("#searchlogs").dialog({
+                            modal: true,
+                            title: "Search logs for ...",
+                            width: 'auto',
+                            buttons: {
+                                Search: function() {
+                                    $( this ).dialog( 'close' );
+                                    $('#Logs').find('.jtable-title-text').text('Logs (filtered)');
+                                    $('#Logs').jtable('load', {
+                                        logfile: $('#logfile').val(),
+                                        user: $('#searchlogs-user').val(),
+                                        entry: $('#searchlogs-entry').val()
+                                    });
+                                },
+                                Reset: function() {
+                                    $('#searchlogs-user').val('');
+                                    $('#searchlogs-entry').val('');
+                                    $( this ).dialog( 'close' );
+                                    $('#Logs').find('.jtable-title-text').text('Logs');
+                                    $('#Logs').jtable('load', {
+                                        logfile: $('#logfile').val()
+                                    });
+                                    return false;
+                                }
+                            }
+                        });
+                    }
+                },
+                <?php if($allowrotatelogs === TRUE) { ?>
+                {
+                    text: 'Rotate logs',
+                    click: function() {
+                        $("#rotatelogs").dialog({
+                            modal: true,
+                            title: "Rotate logs",
+                            width: 'auto',
+                            buttons: {
+                                Ok: function() {
+                                    $.get("logs.php?action=rotate");
+                                    $( this ).dialog( "close" );
+                                    $('#logfile').val('');
+                                    $('#Logs').jtable('load');
+                                },
+                                Cancel: function() {
+                                    $( this ).dialog( "close" );
+                                    return false;
+                                }
+                            }
+                        });
+                    }
+                },
+                <?php } ?>
+                <?php if($allowclearlogs === TRUE) { ?>
                 {
                     icon: 'img/delete_inverted.png',
                     text: 'Clear logs',
@@ -961,6 +1120,7 @@ $(document).ready(function () {
                                 Ok: function() {
                                     $.get("logs.php?action=clear");
                                     $( this ).dialog( "close" );
+                                    $('#logfile').val('');
                                     $('#Logs').jtable('load');
                                 },
                                 Cancel: function() {
@@ -971,17 +1131,18 @@ $(document).ready(function () {
                         });
                     }
                 },
+                <?php } ?>
                 {
                     icon: 'img/export.png',
-                    text: 'Save logs',
+                    text: 'Download logs',
                     click: function () {
-                        var $zexport = $.get("logs.php?action=export", function(data) {
+                        var $zexport = $.get("logs.php?action=export&logfile=" + $('#logfile').val(), function(data) {
                             console.log(data);
                             blob = new Blob([data], { type: 'text/plain' });
                             var dl = document.createElement('a');
                             dl.addEventListener('click', function(ev) {
                                 dl.href = URL.createObjectURL(blob);
-                                dl.download = 'nseditlogs.txt';
+                                dl.download = $('#logfile').val() == "" ? 'nseditlogs.txt':$('#logfile').val() + ".txt";
                             }, false);
 
                             if (document.createEvent) {
@@ -1017,6 +1178,27 @@ $(document).ready(function () {
             }
         }
     });
+
+    $('#logfile').change(function () {
+        $('#Logs').jtable('load', {
+            logfile: $('#logfile').val(),
+            user: $('#searchlogs-user').val(),
+            entry: $('#searchlogs-entry').val()
+        });
+    });
+    <?php } else { ?>
+    $('#AboutMe').hide();
+    $('#aboutme').click(function () {
+        $('#MasterZones').hide();
+        $('#SlaveZones').hide();
+        $('#AboutMe').show();
+    });
+    $('#zoneadmin').click(function () {
+        $('#AboutMe').hide();
+        $('#MasterZones').show();
+        $('#SlaveZones').show();
+    });
+
     <?php } ?>
     $('#MasterZones').jtable('load');
     $('#SlaveZones').jtable('load');

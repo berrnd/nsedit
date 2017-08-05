@@ -35,7 +35,7 @@ if (isset($defaults['primaryns'])) {
 }
 
 if (!isset($logo) or empty($logo)) {
-    $logo = 'http://www.tuxis.nl/uploads/images/nsedit.png';
+    $logo = 'https://www.tuxis.nl/uploads/images/nsedit.png';
 }
 
 
@@ -85,10 +85,12 @@ function string_ends_with($string, $suffix)
 }
 
 function get_db() {
-    global $authdb;
+    global $authdb, $db;
 
-    $db = new SQLite3($authdb, SQLITE3_OPEN_READWRITE);
-    $db->exec('PRAGMA foreign_keys = 1');
+    if (!isset($db)) {
+        $db = new SQLite3($authdb, SQLITE3_OPEN_READWRITE);
+        $db->exec('PRAGMA foreign_keys = 1');
+    }
 
     return $db;
 }
@@ -110,7 +112,6 @@ function get_user_info($u) {
     $q->bindValue(1, $u);
     $result = $q->execute();
     $userinfo = $result->fetchArray(SQLITE3_ASSOC);
-    $db->close();
 
     return $userinfo;
 }
@@ -125,10 +126,8 @@ function do_db_auth($u, $p) {
     $q->bindValue(1, $u);
     $result = $q->execute();
     $userinfo = $result->fetchArray(SQLITE3_ASSOC);
-    $db->close();
 
     if ($userinfo and $userinfo['password'] and (crypt($p, $userinfo['password']) === $userinfo['password'])) {
-        writelog('Succesful login.');
         return TRUE;
     }
 
@@ -150,7 +149,6 @@ function add_user($username, $isadmin = FALSE, $password = '') {
     $q->bindValue(2, $password, SQLITE3_TEXT);
     $q->bindValue(3, (int)(bool) $isadmin, SQLITE3_INTEGER);
     $ret = $q->execute();
-    $db->close();
 
     if ($isadmin) {
         writelog("Added user $username as admin.");
@@ -160,7 +158,7 @@ function add_user($username, $isadmin = FALSE, $password = '') {
     return $ret;
 }
 
-function update_user($username, $isadmin, $password) {
+function update_user($id, $isadmin, $password) {
     if ($password && !preg_match('/\$6\$/', $password)) {
         $salt = bin2hex(openssl_random_pseudo_bytes(16));
         $password = crypt($password, '$6$'.$salt);
@@ -168,33 +166,49 @@ function update_user($username, $isadmin, $password) {
 
     $db = get_db();
 
+    $q = $db->prepare('SELECT * FROM users WHERE id = ?');
+    $q->bindValue(1, $id, SQLITE3_INTEGER);
+    $result = $q->execute();
+    $userinfo = $result->fetchArray(SQLITE3_ASSOC);
+    $q->close();
+    $username = $userinfo['emailaddress'];
+
     if ($password) {
-        $q = $db->prepare('UPDATE users SET isadmin = ?, password = ? WHERE emailaddress = ?');
+        $q = $db->prepare('UPDATE users SET isadmin = ?, password = ? WHERE id = ?');
         $q->bindValue(1, (int)(bool)$isadmin, SQLITE3_INTEGER);
         $q->bindValue(2, $password, SQLITE3_TEXT);
-        $q->bindValue(3, $username, SQLITE3_TEXT);
+        $q->bindValue(3, $id, SQLITE3_INTEGER);
         writelog("Updating password and/or settings for $username. Admin: ".(int)(bool)$isadmin);
     } else {
-        $q = $db->prepare('UPDATE users SET isadmin = ? WHERE emailaddress = ?');
+        $q = $db->prepare('UPDATE users SET isadmin = ? WHERE id = ?');
         $q->bindValue(1, (int)(bool)$isadmin, SQLITE3_INTEGER);
-        $q->bindValue(2, $username, SQLITE3_TEXT); 
+        $q->bindValue(2, $id, SQLITE3_INTEGER); 
         writelog("Updating settings for $username. Admin: ".(int)(bool)$isadmin);
     }
     $ret = $q->execute();
-    $db->close();
 
     return $ret;
 }
 
-function delete_user($username) {
+function delete_user($id) {
     $db = get_db();
-    $q = $db->prepare('DELETE FROM users WHERE id = ?');
-    $q->bindValue(1, $id, SQLITE3_INTEGER);
-    $ret = $q->execute();
-    $db->close();
 
-    writelog("Deleted user $username.");
-    return $ret;
+    $q = $db->prepare('SELECT * FROM users WHERE id = ?');
+    $q->bindValue(1, $id, SQLITE3_INTEGER);
+    $result = $q->execute();
+    $userinfo = $result->fetchArray(SQLITE3_ASSOC);
+    $q->close();
+
+    if($userinfo) {
+        $q = $db->prepare('DELETE FROM users WHERE id = ?');
+        $q->bindValue(1, $id, SQLITE3_INTEGER);
+        $ret = $q->execute();
+
+        writelog("Deleted user " . $userinfo['emailaddress'] . ".");
+        return $ret;
+    } else {
+        return false;
+    }
 }
 
 function valid_user($name) {
@@ -224,6 +238,8 @@ function jtable_respond($records, $method = 'multiple', $msg = 'Undefined errorm
         $jTableResult['RecordCount'] = count($records);
     }
 
+    $db = get_db();
+    $db->close();
     header('Content-Type: application/json');
     print json_encode($jTableResult);
     exit(0);
@@ -273,14 +289,69 @@ function clearlogs() {
 
     $db = get_db();
     $q = $db->query('DELETE FROM logs;');
-    $db->close();
     writelog("Logtable truncated.");
 }
 
-function writelog($line) {
+function rotatelogs() {
+    global $logging, $logsdirectory;
+    if ($logging !== TRUE)
+        return FALSE;
+
+    if(!is_dir($logsdirectory) || !is_writable($logsdirectory)) {
+      writelog("Logs directory cannot be written to.");
+      return FALSE;
+    }
+
+    date_default_timezone_set('UTC');
+    $filename = date("Y-m-d-His") . ".json";
+    $file = fopen($logsdirectory . "/" . $filename, "x");
+
+    if($file === FALSE) {
+      writelog("Can't create file for log rotation.");
+      return FALSE;
+    }
+
+    if(fwrite($file,json_encode(getlogs())) === FALSE) {
+        writelog("Can't write to file for log rotation.");
+        fclose($file);
+        return FALSE;
+    } else {
+        fclose($file);
+        clearlogs();
+        return $filename;
+    }
+
+}
+
+function listrotatedlogs() {
+    global $logging, $logsdirectory;
+    if ($logging !== TRUE)
+        return FALSE;
+
+    $list = scandir($logsdirectory,SCANDIR_SORT_DESCENDING);
+
+    if($list === FALSE) {
+      writelog("Logs directory cannot read.");
+      return FALSE;
+    }
+
+    $list=array_filter($list,
+        function ($val) {
+            return(preg_match('/^[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{6}\.json/',$val) == 1);
+        }
+    );
+
+    return $list;
+}
+
+function writelog($line, $user=False) {
     global $logging;
     if ($logging !== TRUE)
         return;
+
+    if ($user === False) {
+        $user = get_sess_user();
+    }
 
     try {
         $db = get_db();
@@ -292,10 +363,9 @@ function writelog($line) {
         $ret = $q->execute();
 
         $q = $db->prepare('INSERT INTO logs (user, log) VALUES (:user, :log)');
-        $q->bindValue(':user', get_sess_user(), SQLITE3_TEXT);
+        $q->bindValue(':user', $user, SQLITE3_TEXT);
         $q->bindValue(':log', $line, SQLITE3_TEXT);
         $q->execute();
-        $db->close();
     } catch (Exception $e) {
         return jtable_respond(null, 'error', $e->getMessage());
     }

@@ -9,11 +9,13 @@ global $current_user;
 $current_user = false;
 
 // session startup
-function _set_current_user($username, $is_admin = false, $has_csrf_token = false, $is_api = false) {
+function _set_current_user($username, $userid, $localauth = true, $is_admin = false, $has_csrf_token = false, $is_api = false) {
     global $current_user;
 
     $current_user = array(
         'username' => $username,
+        'id' => $userid,
+        'localauth' => $localauth,
         'is_admin' => $is_admin,
         'has_csrf_token' => $has_csrf_token,
         'is_api' => $is_api,
@@ -150,6 +152,7 @@ function _try_login($username, $password) {
     global $wefactapiurl, $wefactapikey;
 
     if (!valid_user($username)) {
+        writelog("Illegal username at login!", $username);
         return false;
     }
 
@@ -158,6 +161,7 @@ function _try_login($username, $password) {
     if (isset($wefactapiurl) && isset($wefactapikey)) {
         $wefact = do_wefact_auth($username, $password);
         if (false === $wefact ) {
+            writelog("Failed Wefact login!", $username);
             return false;
         }
         if (-1 !== $wefact) {
@@ -166,14 +170,16 @@ function _try_login($username, $password) {
     }
 
     if ($do_local_auth && !do_db_auth($username, $password)) {
+        writelog("Failed login!", $username);
         return false;
     }
 
     $user = get_user_info($username);
     if (!$user) {
+        writelog("Failed to find user!", $username);
         return false;
     } else {
-        _set_current_user($username, (bool) $user['isadmin']);
+        _set_current_user($username, $user['id'], (bool) $do_local_auth, (bool) $user['isadmin']);
 
         if (session_id()) {
             session_unset();
@@ -183,6 +189,8 @@ function _try_login($username, $password) {
         session_regenerate_id(true) or die('session failure: regenerated id failed');
         session_unset();
         $_SESSION['username'] = $username;
+        $_SESSION['localauth'] = $do_local_auth;
+        $_SESSION['userid'] = $user['id'];
 
         # requires session:
         _check_csrf_token($user);
@@ -202,7 +210,7 @@ function _check_session() {
             and $_POST['adminapikey'] === $adminapikey)
         {
             # Allow this request, fake that we're logged in as user.
-            return _set_current_user('admin', true, true, true);
+            return _set_current_user('admin', 1, false, true, true, true);
         }
         else
         {
@@ -218,7 +226,7 @@ function _check_session() {
                 session_destroy();
                 session_unset();
             } else {
-                _set_current_user($_SESSION['username'], (bool) $user['isadmin']);
+                _set_current_user($_SESSION['username'], $_SESSION['userid'], (bool) $_SESSION['localauth'], (bool) $user['isadmin']);
                 _check_csrf_token($user);
                 return;
             }
@@ -275,6 +283,16 @@ function is_adminuser() {
 function get_sess_user() {
     global $current_user;
     return $current_user ? $current_user['username'] : null;
+}
+
+function get_sess_userid() {
+    global $current_user;
+    return $current_user ? $current_user['id'] : null;
+}
+
+function has_local_auth() {
+    global $current_user;
+    return $current_user ? $current_user['localauth'] : null;
 }
 
 function logout() {

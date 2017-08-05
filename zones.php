@@ -12,10 +12,12 @@ if (!is_csrf_safe()) {
     jtable_respond(null, 'error', "Authentication required");
 }
 
+
+$quoteus = array('TXT', 'SPF');
+
 /* This function is taken from:
 http://pageconfig.com/post/how-to-validate-ascii-text-in-php and got fixed by
 #powerdns */
-
 function is_ascii($string) {
     return ( bool ) ! preg_match( '/[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f\\x80-\\xff]/' , $string );
 }
@@ -112,7 +114,6 @@ function add_db_zone($zonename, $accountname) {
     $q->bindValue(1, $zonename, SQLITE3_TEXT);
     $q->bindValue(2, $accountname, SQLITE3_TEXT);
     $q->execute();
-    $db->close();
 }
 
 function delete_db_zone($zonename) {
@@ -123,7 +124,6 @@ function delete_db_zone($zonename) {
     $q = $db->prepare("DELETE FROM zones WHERE zone = ?");
     $q->bindValue(1, $zonename, SQLITE3_TEXT);
     $q->execute();
-    $db->close();
 }
 
 function get_zone_account($zonename, $default) {
@@ -135,12 +135,21 @@ function get_zone_account($zonename, $default) {
     $q->bindValue(1, $zonename, SQLITE3_TEXT);
     $result = $q->execute();
     $zoneinfo = $result->fetchArray(SQLITE3_ASSOC);
-    $db->close();
     if (isset($zoneinfo['emailaddress']) && $zoneinfo['emailaddress'] != null ) {
         return $zoneinfo['emailaddress'];
     }
 
     return $default;
+}
+
+function quote_content($content) {
+    # empty TXT records are ok, otherwise require surrounding quotes: "..."
+    if (strlen($content) == 1 || substr($content, 0, 1) !== '"' || substr($content, -1) !== '"') {
+        # fix quoting: first escape all \, then all ", then surround with quotes.
+        $content = '"'.str_replace('"', '\\"', str_replace('\\', '\\\\', $content)).'"';
+    }
+
+    return $content;
 }
 
 function check_account($zone) {
@@ -165,7 +174,9 @@ case "listslaves":
     foreach ($api->listzones($q) as $sresult) {
         $zone = new Zone();
         $zone->parse($sresult);
-        $zone->setAccount(get_zone_account($zone->name, 'admin'));
+        if ($zone->account == '') {
+            $zone->setAccount(get_zone_account($zone->name, 'admin'));
+        }
 
         if (!check_account($zone))
             continue;
@@ -188,6 +199,31 @@ case "listrecords":
     $zone = new Zone();
     $zone->parse($zonedata);
     $records = $zone->rrsets2records();
+
+    if(!empty($_POST['label'])) {
+        $records=array_filter($records,
+            function ($val) {
+                return(stripos($val['name'], $_POST['label']) !== FALSE);
+            }
+        );
+    }
+
+    if(!empty($_POST['type'])) {
+        $records=array_filter($records,
+            function ($val) {
+                return($val['type'] == $_POST['type']);
+            }
+        );
+    }
+
+    if(!empty($_POST['content'])) {
+        $records=array_filter($records,
+            function ($val) {
+                return(stripos($val['content'], $_POST['content']) !== FALSE);
+            }
+        );
+    }
+
     if (isset($_GET['jtSorting'])) {
         list($scolumn, $sorder) = preg_split("/ /", $_GET['jtSorting']);
         switch ($scolumn) {
@@ -248,7 +284,7 @@ case "create":
             $zone->importData($_POST['zone']);
         }
         if (isset($defaults['soa_edit_api'])) {
-            $zone->setSoaEditApi($defaults['soa_edit_api']);
+            $zone->setSoaEditApi($defaults['soa_edit_api'], True);
         }
         if (isset($defaults['soa_edit'])) {
             $zone->setSoaEdit($defaults['soa_edit']);
@@ -294,7 +330,8 @@ case "create":
             $api->savezone($zone->export());
 
             foreach ($template['records'] as $record) {
-                $zone->addRecord($record['name'], $record['type'], $record['content']);
+                $name = $record['name'] != '' ? join(Array($record['name'],'.',$zonename)) : $zonename;
+                $zone->addRecord($name, $record['type'], $record['content']);
             }
 
             break;
@@ -309,6 +346,8 @@ case "create":
 case "update":
     $zone = new Zone();
     $zone->parse($api->loadzone($_POST['id']));
+    if ($zone->setSoaEditApi($defaults['soa_edit_api']) != False)
+        writelog("Set SOA-EDIT-API to ".$defaults['soa_edit_api']." for ",$zone->name);
     $zoneaccount = isset($_POST['account']) ? $_POST['account'] : $zone->account;
 
     if ($zone->account !== $zoneaccount) {
@@ -335,6 +374,8 @@ case "update":
 case "createrecord":
     $zone = new Zone();
     $zone->parse($api->loadzone($_GET['zoneid']));
+    if ($zone->setSoaEditApi($defaults['soa_edit_api']) != False)
+        writelog("Set SOA-EDIT-API to ".$defaults['soa_edit_api']." for ",$zone->name);
 
     $name = isset($_POST['name']) ? $_POST['name'] : '';
     $type = $_POST['type'];
@@ -344,12 +385,13 @@ case "createrecord":
         $name = $zone->name;
     } elseif (string_ends_with($name, '.')) {
         # "absolute" name, shouldn't append zone[name] - but check.
-        $name = substr($name, 0, -1);
         if (!string_ends_with($name, $zone->name)) {
             jtable_respond(null, 'error', "Name $name not in zone ".$zone->name);
         }
-    } else if (!string_ends_with($name, $zone->name)) {
+    } else if (!string_ends_with($name.'.', $zone->name)) {
         $name = $name . '.' . $zone->name;
+    } else {
+        $name = $name.'.';
     }
 
     if (!_valid_label($name)) {
@@ -362,6 +404,10 @@ case "createrecord":
         jtable_respond(null, 'error', "Please only use ASCII-characters in your fields");
     }
 
+    if (array_search($type, $quoteus) !== FALSE) {
+        $content = quote_content($content);
+    }
+
     $record = $zone->addRecord($name, $type, $content, $_POST['disabled'], $_POST['ttl'], $_POST['setptr']);
     $api->savezone($zone->export());
 
@@ -372,16 +418,25 @@ case "createrecord":
 case "editrecord":
     $zone = new Zone();
     $zone->parse($api->loadzone($_GET['zoneid']));
+    if ($zone->setSoaEditApi($defaults['soa_edit_api']) != False)
+        writelog("Set SOA-EDIT-API to ".$defaults['soa_edit_api']." for ",$zone->name);
 
     $old_record = decode_record_id(isset($_POST['id']) ? $_POST['id'] : '');
 
     $rrset = $zone->getRRSet($old_record['name'], $old_record['type']);
     $rrset->deleteRecord($old_record['content']);
-    $zone->addRecord($_POST['name'], $_POST['type'], $_POST['content'], $_POST['disabled'], $_POST['ttl'], $_POST['setptr']);
+
+    $content = $_POST['content'];
+    $type = $_POST['type'];
+    if (array_search($type, $quoteus) !== FALSE) {
+        $content = quote_content($content);
+    }
+
+    $zone->addRecord($_POST['name'], $_POST['type'], $content, $_POST['disabled'], $_POST['ttl'], $_POST['setptr']);
 
     $api->savezone($zone->export());
 
-    $record = $zone->getRecord($_POST['name'], $_POST['type'], $_POST['content']);
+    $record = $zone->getRecord($_POST['name'], $_POST['type'], $content);
     writelog("Updated record ".$_POST['id']." to ".$record['id']);
     jtable_respond($record, 'single');
     break;
@@ -389,6 +444,8 @@ case "editrecord":
 case "deleterecord":
     $zone = new Zone();
     $zone->parse($api->loadzone($_GET['zoneid']));
+    if ($zone->setSoaEditApi($defaults['soa_edit_api']) != False)
+        writelog("Set SOA-EDIT-API to ".$defaults['soa_edit_api']." for ",$zone->name);
 
     $old_record = decode_record_id(isset($_POST['id']) ? $_POST['id'] : '');
     $rrset = $zone->getRRSet($old_record['name'], $old_record['type']);
@@ -419,6 +476,8 @@ case "clone":
 
     $srczone = new Zone();
     $srczone->parse($api->loadzone($src));
+    if ($srczone->setSoaEditApi($defaults['soa_edit_api']) != False)
+        writelog("Set SOA-EDIT-API to ".$defaults['soa_edit_api']." for ",$srczone->name);
 
     $srczone->setId('');
     $srczone->setName($name);
@@ -471,6 +530,7 @@ case "getformnameservers":
     break;
 case "formzonelist":
     $zones = $api->listzones();
+    usort($zones, "zone_compare");
     $ret = array();
     foreach ($zones as $zone) {
         if ($zone['kind'] == 'Slave')
